@@ -120,3 +120,63 @@ Work method note: all of this was coded here directly, without Hermes/FlashPool.
 - PR A: https://github.com/storytold/cadcraft/pull/1968
 - PR B: https://github.com/storytold/cadcraft/pull/1969
 Fork: https://github.com/MrBeeboh/cadcraft. No issue comments, no people.toml entry.
+
+# Session 2 — 2026-10-22 evening (8:20–9:30 PM PT)
+
+## Fixed, tested, PR'd (each its own branch off upstream main, all merged into michael-build)
+| Fix | PR |
+|---|---|
+| #1948 big DWG refused: DXF tag cap 50M → 150M, env `CADCRAFT_MAX_DXF_TAGS` to change it | #1976 |
+| #1956 AREA in architectural units now "N sq in (M sq ft)" instead of feet-inches | #1977 |
+| #1928 follow-up: plot-style and plotter files now saved atomically (main saves/autosave were already fixed upstream) | #1978 |
+| #1964 COPY of hatch + rectangle: the copied hatch stays associative, so STRETCH works on it | #1979 |
+| #1966 part 1: layout viewport showed empty area (view target ignored) | #1980 |
+| #1966 part 2: huge leader arrows (per-leader DIMASZ/DIMSCALE overrides ignored) | #1981 |
+| Xrefs: saved path found even if letter case differs (Windows-made drawings on Linux) | #1982 |
+| #1930 LISP `append` could blow memory before the cell cap check | #1983 |
+| #1927 LISP relative `(load "x")` no longer looks in the working folder | #1984 |
+Each branch alone: full workspace tests pass (2264–2266, 0 failed), clippy -D warnings and fmt clean.
+michael-build with everything: 2300 passed, 0 failed.
+
+## Already done upstream (nothing to do)
+- TRIM/EXTEND eRase, OFFSET Erase/Layer, ROTATE/SCALE Reference all exist in v0.12.0.
+- #1926 LISP hangs (vl-sort callbacks, wcmatch) already bounded in v0.12.0.
+
+## Xref findings
+Searched upstream: #1636 (xref not found, then crash after changing path; no sample file), #1625
+(one big xref freezes 30 s / 8 GB). I built test host drawings with xrefs (DXF and DWG children)
+and tried: `..\xr\child.dxf`, `../xr/child.dxf`, `.\sub\child.dxf`, `sub\child.dxf`, an old
+`C:\Proj\Old\child.dxf` (file next to host), plain `child.dxf`, overlay, a `\\server\share` path,
+and a DWG child. All load. Only failure: different letter case → fixed in PR #1982.
+Things that still bite people (by design, not fixed):
+- Network paths (`\\server\share\...`, `file://`) are refused on purpose for security; CADCraft
+  then only looks next to the host drawing. An office with xrefs on a server share will see
+  "not loaded… another computer". Mapped drive letters (Z:\...) do work.
+- No xref search path / project path like AutoCAD's PROJECTNAME.
+- #1636 crash after changing the path: couldn't reproduce without the file.
+
+## Windows build
+Now builds WITH the app icon. The repo's build.rs (winresource) needs `windres`; I added shims
+in ~/build/wintools (zig-windres uses `zig rc`, zig-ar uses `zig ar`). Build command:
+  WINDRES=~/build/wintools/zig-windres AR=~/build/wintools/zig-ar CADCRAFT_REQUIRE_WINRES=1 \
+  cargo zigbuild --release --target x86_64-pc-windows-gnu -p cadcraft
+Mini PC: 8:45 PM build (no icon) installed as cadcraft.exe and launched OK (backup
+cadcraft-20261022-2045.exe). The 9:16 PM icon build is staged as cadcraft-next.exe (launched OK)
+because CADCraft was open (started 9:16 PM), so cadcraft.exe couldn't be swapped. Backup of the
+current one: cadcraft-20261022-2116.exe. To finish: close CADCraft, rename cadcraft-next.exe → cadcraft.exe.
+
+## Needs Michael's go-ahead (bigger than they look)
+- Associative array grip editing (count/spacing grips): ~6–10 h; new grip kinds in engine + canvas.
+- CTRL+click delete of one array item in the UI: ~4–6 h; needs sub-object picking in the canvas
+  (the engine side, ARRAYEDIT DELete, is done in #1968).
+- Associative ARRAYPATH: ~1–2 days; new array kind that follows its path, save/load, edit.
+- SUPERHATCH: ~1–2 days; new command tiling an image/block/xref inside a boundary.
+- TXT2MTXT Settings dialog: ~3–4 h of egui work; settings already work at the command line.
+- Printing to a real Windows printer: ~2–3 days; printer list in Plot dialog, a Windows printing
+  dependency (repo forbids unsafe code), real printer testing. Workaround: plot to PDF, print it.
+- #1966 part 3 (paper sheet not lined up with title block): ~4–8 h; layouts need plot area
+  Window/Extents, plot origin and centering from the page setup. Without the reporter's file it's
+  guesswork.
+- #1966 twisted viewports (view twist angle 51): ~4 h+ through render and snaps.
+- #1920 LISP command-line stack overflow (audit, Medium): not looked at tonight; ~2–4 h.
+- Network xref paths: a policy decision (security vs convenience), not a code size issue.
