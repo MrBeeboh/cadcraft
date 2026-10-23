@@ -26,6 +26,8 @@ macro_rules! outln {
     }};
 }
 
+mod agent;
+
 use std::process::ExitCode;
 
 use cadcraft_engine::doc::Space;
@@ -63,7 +65,17 @@ const USAGE: &str = "usage:
   cadcraft-cli mcp [--connect HOST:PORT [--lazy] [--launch]]
   cadcraft-cli perf [N | FILE]
   cadcraft-cli sample (bracket|floorplan) OUT.(dxf|dwg|svg|png)
+  cadcraft-cli describe                (machine-readable CLI surface, JSON)
+  cadcraft-cli validate FILE           (does it read cleanly? JSON)
   cadcraft-cli --version
+
+agent options (additive; defaults unchanged):
+  run --cmd-file F.txt     one `id {json}` command per line (# comments, blank lines ok)
+  run --dry-run            run everything, write nothing (reports what would be written)
+  run --report OUT.json    per-step results, log and outputs as JSON (`-` = stderr)
+  --json (anywhere) or CADCRAFT_JSON=1
+                           errors as one JSON line on stderr, exit codes 2 usage,
+                           3 file/io, 4 command failed (default: plain text, exit 1)
 
 image framing (png 2400x1600, svg, pdf; always model space):
   default                  convert: fit the drawing extents.
@@ -316,6 +328,10 @@ fn skipped_message(d: &cadcraft_engine::doc::Drawing, path: &str) -> Option<Stri
 
 fn run(args: &[String]) -> Result<(), String> {
     let mut s = Session::empty();
+    let mut dry_run = false;
+    let mut report: Option<String> = None;
+    let mut results: Vec<Value> = Vec::new();
+    let mut written: Vec<Value> = Vec::new();
     let mut it = args.iter();
     let mut save = None;
     let mut exp: Option<String> = None;
@@ -338,6 +354,13 @@ fn run(args: &[String]) -> Result<(), String> {
                 steps.push(("script".into(), std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?));
             }
             "--cmd" => steps.push(("cmd".into(), it.next().ok_or("--cmd needs `id {json}`")?.clone())),
+            "--cmd-file" => {
+                let p = it.next().ok_or("--cmd-file needs a path")?;
+                let text = std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?;
+                steps.extend(agent::cmd_file_lines(&text).into_iter().map(|l| ("cmd".to_string(), l)));
+            }
+            "--dry-run" => dry_run = true,
+            "--report" => report = Some(it.next().ok_or("--report needs a path")?.clone()),
             "--save" => save = Some(it.next().ok_or("--save needs a path")?.clone()),
             "--export" => exp = Some(it.next().ok_or("--export needs a path")?.clone()),
             f if !f.starts_with("--") => open(&mut s, f)?,
@@ -349,30 +372,74 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     check_framed_output(framing, exp.as_deref())?;
     let before = model_views(&s);
-    for (kind, body) in steps {
-        match kind.as_str() {
-            "script" => s.script(&body).map_err(|e| e.to_string())?,
+    let mut failure: Option<String> = None;
+    for (i, (kind, body)) in steps.iter().enumerate() {
+        let step = match kind.as_str() {
+            "script" => s.script(body).map(|_| Value::Null).map_err(|e| e.to_string()),
             _ => {
-                let (id, json) = body.split_once(' ').unwrap_or((&body, "{}"));
-                let params: Value = serde_json::from_str(json).map_err(|e| format!("--cmd {id}: {e}"))?;
-                let r = s.execute(id, &params).map_err(|e| e.to_string())?;
-                if !r.is_null() {
+                let (id, json) = body.split_once(' ').unwrap_or((body, "{}"));
+                serde_json::from_str::<Value>(json)
+                    .map_err(|e| format!("--cmd {id}: {e}"))
+                    .and_then(|params| s.execute(id, &params).map_err(|e| e.to_string()))
+            }
+        };
+        match step {
+            Ok(r) => {
+                if kind != "script" && !r.is_null() {
                     outln!("{r}");
                 }
+                results.push(json!({"step": i, "kind": kind, "input": body, "ok": true, "result": r}));
+            }
+            Err(e) => {
+                results.push(json!({"step": i, "kind": kind, "input": body, "ok": false, "error": e}));
+                failure = Some(e);
+                break;
             }
         }
     }
     for l in &s.log {
         eprintln!("{l}");
     }
-    if let Some(p) = save {
-        export(&s, &p)?;
+    if failure.is_none() {
+        if let Some(p) = save {
+            if dry_run {
+                eprintln!("dry run: would write {p}");
+            } else {
+                export(&s, &p)?;
+            }
+            written.push(json!({"path": p, "role": "save", "written": !dry_run}));
+        }
+        if let Some(p) = exp {
+            let window = if cadcraft_io::is_image(&p) { export_window(&s, framing, Some(&before))? } else { None };
+            if dry_run {
+                eprintln!("dry run: would write {p}");
+            } else {
+                export_framed(&s, &p, window)?;
+            }
+            written.push(json!({"path": p, "role": "export", "written": !dry_run}));
+        }
     }
-    if let Some(p) = exp {
-        let window = if cadcraft_io::is_image(&p) { export_window(&s, framing, Some(&before))? } else { None };
-        export_framed(&s, &p, window)?;
+    if let Some(r) = report {
+        let summary = json!({
+            "ok": failure.is_none(),
+            "dry_run": dry_run,
+            "steps": results,
+            "log": s.log,
+            "outputs": written,
+            "entities": s.doc().map(|d| d.entity_count()).ok(),
+            "error": failure,
+        });
+        let text = serde_json::to_string_pretty(&summary).unwrap_or_default();
+        if r == "-" {
+            eprintln!("{text}")
+        } else {
+            std::fs::write(&r, text).map_err(|e| format!("{r}: {e}"))?;
+        }
     }
-    Ok(())
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Small deterministic generator (xorshift64*) so perf runs are repeatable without a dependency.
@@ -667,7 +734,9 @@ fn main() -> ExitCode {
 
 fn cli() -> ExitCode {
     install_io();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let json_flag = raw.iter().any(|a| a == "--json");
+    let args: Vec<String> = raw.into_iter().filter(|a| a != "--json").collect();
     let rest: Vec<String> = args.iter().skip(1).cloned().collect();
     let r = match args.first().map(String::as_str) {
         Some("info") => validate_options("info", &rest, NO_OPTIONS).and_then(|_| rest.first().ok_or_else(|| USAGE.to_string())).and_then(|p| info(p)),
@@ -686,6 +755,11 @@ fn cli() -> ExitCode {
             outln!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
         }),
         Some("mcp") => mcp(&rest),
+        Some("describe") => validate_options("describe", &rest, NO_OPTIONS)
+            .map(|_| outln!("{}", serde_json::to_string_pretty(&agent::describe()).unwrap_or_default())),
+        Some("validate") => {
+            validate_options("validate", &rest, NO_OPTIONS).and_then(|_| rest.first().ok_or_else(|| USAGE.to_string())).and_then(|p| validate(p))
+        }
         Some("--version" | "-V") => {
             outln!("cadcraft-cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -698,11 +772,38 @@ fn cli() -> ExitCode {
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) if json_flag || agent::json_env() => {
+            let code = agent::classify(&e);
+            eprintln!("{}", json!({"ok": false, "error": e, "kind": code.0, "exit_code": code.1}));
+            ExitCode::from(code.1)
+        }
         Err(e) => {
             eprintln!("{e}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// `validate FILE`: open a drawing and report, as JSON, whether it reads cleanly. Exit 0 either
+/// way when it opens; `clean` is false when records were skipped or entities can't be drawn.
+fn validate(path: &str) -> Result<(), String> {
+    let mut s = Session::empty();
+    open(&mut s, path)?;
+    let d = s.doc().map_err(|e| e.to_string())?;
+    let warnings: Vec<String> = [skipped_message(d, path), undrawn_message(d, path)].into_iter().flatten().collect();
+    let lost = cadcraft_engine::cmd::file::not_saved(d);
+    let not_saved = cadcraft_engine::cmd::file::not_saved_message(&lost);
+    let ext = d.extents(&Space::Model);
+    let v = json!({
+        "path": path,
+        "clean": warnings.is_empty(),
+        "entities": d.entity_count(),
+        "extents": if ext.is_empty() { Value::Null } else { json!([ext.min.x, ext.min.y, ext.max.x, ext.max.y]) },
+        "warnings": warnings,
+        "dxf_save_loss": not_saved,
+    });
+    outln!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+    Ok(())
 }
 
 #[cfg(test)]
