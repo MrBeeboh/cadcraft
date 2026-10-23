@@ -115,3 +115,8 @@ Work method note: all of this was coded here directly, without Hermes/FlashPool.
   C:\Users\Michael Brady\AppData\Local\Programs\CADCraft\cadcraft-0.12.0-windows-x64-portable.
   It launched (window "CADCraft"), was still running after 15 s, then was closed.
 - To go back: rename cadcraft-20261022-1901.exe to cadcraft.exe.
+
+## Posted 2026-10-22 ~7:05 PM PT (approved one-time exception)
+- PR A: https://github.com/storytold/cadcraft/pull/1968
+- PR B: https://github.com/storytold/cadcraft/pull/1969
+Fork: https://github.com/MrBeeboh/cadcraft. No issue comments, no people.toml entry.
